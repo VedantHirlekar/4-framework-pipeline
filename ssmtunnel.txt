@@ -1,0 +1,661 @@
+# AWS SSM + SSH + VS Code Remote SSH
+
+## Goal
+
+We have an **EC2 instance in a private subnet** with:
+
+* No public IP
+* No port 22 open to the Internet
+* No EC2 key pair at launch
+
+We want to connect from our laptop using:
+
+```text
+Laptop
+   |
+   | AWS SSM
+   v
+Private EC2
+   |
+   v
+VS Code Remote SSH
+```
+
+This lets us edit and run our project directly on the EC2 instance.
+
+---
+
+# Step 1 — Create IAM Role for EC2
+
+### Why?
+
+The EC2 instance needs permission to communicate with **AWS Systems Manager (SSM)**.
+
+Create an IAM role:
+
+```text
+employee-ec2-ssm-role
+```
+
+Attach:
+
+```text
+AmazonSSMManagedInstanceCore
+```
+
+### How?
+
+AWS Console:
+
+```text
+AWS Console
+→ IAM
+→ Roles
+→ Create role
+→ Trusted entity: AWS service
+→ Use case: EC2
+→ Next
+→ Search: AmazonSSMManagedInstanceCore
+→ Select it
+→ Create role
+```
+
+Then attach the role to the EC2:
+
+```text
+EC2
+→ Instances
+→ employee-app-server
+→ Actions
+→ Security
+→ Modify IAM role
+→ employee-ec2-ssm-role
+→ Update IAM role
+```
+
+### What does this do?
+
+It allows:
+
+EC2 → AWS Systems Manager
+```
+
+The EC2 instance can now register itself with SSM.
+
+---
+
+# Step 2 — Create IAM User for Laptop
+
+We also need permission on our **laptop side** to request an SSM connection.
+
+Create IAM user:
+
+```text
+employee-lab-cli
+```
+
+For our lab, attach:
+
+```text
+AmazonSSMFullAccess
+```
+
+### How?
+
+AWS Console:
+
+```text
+IAM
+→ Users
+→ Create user
+→ employee-lab-cli
+→ Attach permissions
+→ AmazonSSMFullAccess
+→ Create user
+```
+
+For a production environment, we should later replace this with a **least-privilege policy**.
+
+---
+
+# Step 3 — Configure AWS CLI Profile on Laptop
+
+## Why do we need this?
+
+Our laptop needs to tell AWS:
+
+> "Which AWS account/user should I use when I run AWS commands?"
+
+We can configure AWS CLI credentials using:
+
+```bash
+aws configure
+```
+
+But in our case, we already had another AWS account configured.
+
+Therefore, instead of replacing the existing credentials, we created a **separate AWS CLI profile**:
+
+```text
+employee-lab
+```
+
+This is safer and easier when working with multiple AWS accounts.
+
+---
+
+## 3.1 Check AWS CLI
+
+On the laptop:
+
+```bash
+aws --version
+```
+
+Example:
+
+```text
+aws-cli/2.x.x ...
+```
+
+If AWS CLI is installed, continue.
+
+---
+
+## 3.2 Create the profile
+
+Run:
+
+```bash
+aws configure --profile employee-lab
+```
+
+AWS CLI will ask:
+
+```text
+AWS Access Key ID:
+AWS Secret Access Key:
+Default region name:
+Default output format:
+```
+
+Enter the credentials belonging to:
+
+```text
+employee-lab-cli
+```
+
+For our project:
+
+```text
+Default region name:
+ap-southeast-2
+
+Default output format:
+json
+```
+
+So conceptually:
+
+```text
+AWS Access Key ID:     <your access key>
+AWS Secret Access Key: <your secret key>
+Default region:        ap-southeast-2
+Output format:         json
+```
+
+### Important
+
+Do **not** put your real access key or secret key in notes, GitHub, screenshots, or code.
+
+---
+
+## 3.3 What happened behind the scenes?
+
+The command:
+
+```bash
+aws configure --profile employee-lab
+```
+
+creates a named AWS CLI profile.
+
+You can think of it like:
+
+```text
+AWS CLI
+│
+├── default profile
+│      ↓
+│   Old AWS account
+│
+└── employee-lab profile
+       ↓
+   employee-lab-cli
+```
+
+Therefore, whenever we want to work with this AWS account, we use:
+
+```bash
+--profile employee-lab
+```
+
+---
+
+## 3.4 Verify which AWS user we are using
+
+Run:
+
+```bash
+aws sts get-caller-identity --profile employee-lab
+```
+
+Example:
+
+```json
+{
+    "UserId": "...",
+    "Account": "...",
+    "Arn": "arn:aws:iam::...:user/employee-lab-cli"
+}
+```
+
+### What does this command do?
+
+`sts get-caller-identity` asks AWS:
+
+> "Who am I authenticated as?"
+
+This is one of the most useful AWS troubleshooting commands.
+
+### Remember:
+
+```bash
+aws sts get-caller-identity --profile employee-lab
+```
+
+means:
+
+```text
+AWS CLI
+   ↓
+Use employee-lab credentials
+   ↓
+Ask AWS who I am
+   ↓
+Return IAM identity
+```
+
+---
+
+## 3.5 Check that AWS CLI can see our EC2 through SSM
+
+Run:
+
+```bash
+aws ssm describe-instance-information \
+  --profile employee-lab \
+  --region ap-southeast-2
+```
+
+If the EC2 is correctly connected to SSM, we should see information about:
+
+```text
+i-0a963f6ab1fca3e3e
+```
+
+and its status should be:
+
+```text
+Online
+```
+
+### Meaning
+
+```text
+Laptop
+   |
+   | AWS CLI
+   v
+AWS
+   |
+   | SSM
+   v
+EC2
+```
+
+If EC2 appears as:
+
+```text
+Online
+```
+
+SSM communication is working.
+
+---
+
+# Step 4 — Create SSH Key on Laptop
+
+Even though we're using SSM, SSH still needs authentication.
+
+On the laptop:
+
+```bash
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
+```
+
+Create an ED25519 key:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/employee-ec2
+```
+
+This creates:
+
+```text
+~/.ssh/employee-ec2
+~/.ssh/employee-ec2.pub
+```
+
+### Important
+
+```text
+employee-ec2
+```
+
+= private key
+
+```text
+employee-ec2.pub
+```
+
+= public key
+
+Never share:
+
+```text
+employee-ec2
+```
+
+---
+
+# Step 5 — Configure SSH on EC2
+
+Connect to EC2 using SSM Session Manager.
+
+Create SSH directory:
+
+```bash
+mkdir -p /home/ssm-user/.ssh
+```
+
+Set permissions:
+
+```bash
+chmod 700 /home/ssm-user/.ssh
+```
+
+Create authorized keys file:
+
+```bash
+touch /home/ssm-user/.ssh/authorized_keys
+```
+
+Set permission:
+
+```bash
+chmod 600 /home/ssm-user/.ssh/authorized_keys
+```
+
+Add the contents of your laptop's:
+
+```text
+~/.ssh/employee-ec2.pub
+```
+
+to:
+
+```text
+/home/ssm-user/.ssh/authorized_keys
+```
+
+### Why?
+
+SSH works using:
+
+```text
+Laptop private key
+       ↓
+EC2 authorized_keys
+       ↓
+Authentication
+```
+
+The private key stays on the laptop.
+
+---
+
+# Step 6 — Test SSH Through SSM
+
+From the laptop:
+
+```bash
+aws ssm start-session \
+  --target i-0a963f6ab1fca3e3e \
+  --document-name AWS-StartSSHSession \
+  --parameters 'portNumber=22' \
+  --profile employee-lab \
+  --region ap-southeast-2
+```
+The command:
+
+aws ssm start-session ... with:AWS-StartSSHSession portNumber=22 means:
+
+"SSM, create a connection/tunnel from my laptop to port 22 of this EC2 so SSH traffic can pass through it."
+If successful, we see something similar to:
+
+```text
+Starting session with SessionId: ...
+SSH-2.0-OpenSSH...
+```
+
+### What is happening?
+
+Normally:
+
+```text
+Laptop
+   |
+   | SSH :22
+   v
+Public EC2
+```
+
+But our EC2 is private.
+
+Instead:
+
+```text
+Laptop
+   |
+   | SSM
+   v
+AWS Systems Manager
+   |
+   | secure tunnel
+   v
+Private EC2 :22
+```
+
+So port 22 does **not** need to be publicly accessible.
+
+---
+
+# Step 7 — Configure SSH Config on Laptop
+
+Edit:
+
+```bash
+nano ~/.ssh/config
+```
+
+Add:
+
+```ssh
+Host employee-app-server
+    HostName i-0a963f6ab1fca3e3e
+    User ssm-user
+    IdentityFile ~/.ssh/employee-ec2
+    ProxyCommand aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters "portNumber=%p" --profile employee-lab --region ap-southeast-2
+```
+
+Set permissions:
+
+```bash
+chmod 600 ~/.ssh/config
+```
+we did this so that we can connect to ec2 using short command ssh employee-app-server
+we dont need that aws ssm long command as we set the config in a file
+---
+
+# Step 8 — Connect Using SSH
+
+Now we don't need to type the long SSM command.
+
+Simply run:
+
+```bash
+ssh employee-app-server
+```
+
+SSH reads:
+
+```text
+~/.ssh/config
+```
+
+and automatically knows:
+
+```text
+Host = employee-app-server
+User = ssm-user
+Key = ~/.ssh/employee-ec2
+SSM = employee-lab profile
+Region = ap-southeast-2
+```
+
+Test:
+
+```bash
+whoami
+```
+
+Expected:
+
+```text
+ssm-user
+```
+
+Check location:
+
+```bash
+pwd
+```
+
+Expected:
+
+```text
+/home/ssm-user
+```
+
+---
+
+# Step 9 — Connect VS Code to EC2
+
+Install the VS Code extension:
+
+```text
+Remote - SSH
+```
+
+Microsoft extension:
+
+```text
+Remote - SSH
+```
+
+Then:
+
+```text
+Ctrl + Shift + P
+```
+
+Select:
+
+```text
+Remote-SSH: Connect to Host...
+```
+
+Select:
+
+```text
+employee-app-server
+```
+
+VS Code connects using:
+
+```text
+VS Code
+   ↓
+SSH
+   ↓
+AWS SSM tunnel
+   ↓
+Private EC2
+```
+
+You should see:
+
+```text
+SSH: employee-app-server
+```
+
+in the bottom-left corner.
+
+---
+
+---
+
+# Important Architecture
+
+Our final connection path is:
+
+```text
+                    AWS
+                     |
+                     |
+                 SSM Service
+                     |
+                     |
+Laptop ──────── SSM Tunnel
+                     |
+                     |
+             Private EC2
+                     |
+                 SSH :22
+                     |
+                 ssm-user
+                     |
+                  Docker
+                     |
+                  NGINX
+              /   /   |   \
+             /   /    |    \
+       FastAPI Express Spring .NET
+                     |
+                   RDS
+```
+
+---
+

@@ -1,0 +1,397 @@
+# AWS VPC SETUP NOTES
+
+1. CREATE VPC
+
+---
+
+AWS Console:
+VPC → Your VPCs → Create VPC
+
+Select:
+Resources to create: VPC only
+Name: employee-vpc
+IPv4 CIDR: 10.0.0.0/16
+IPv6: No IPv6
+Tenancy: Default
+
+Note:
+AWS Region is selected from the top-right Region selector.
+All resources should be created in the same Region.
+
+2. CREATE SUBNETS
+
+---
+
+Use 2 Availability Zones.
+
+AZ-1:
+employee-public-1
+CIDR: 10.0.1.0/24
+
+```
+employee-private-app-1
+CIDR: 10.0.3.0/24
+
+employee-private-db-1
+CIDR: 10.0.5.0/24
+```
+
+AZ-2:
+employee-public-2
+CIDR: 10.0.2.0/24
+
+```
+employee-private-app-2
+CIDR: 10.0.4.0/24
+
+employee-private-db-2
+CIDR: 10.0.6.0/24
+```
+
+Procedure:
+VPC → Subnets → Create subnet
+
+Select:
+VPC: employee-vpc
+Availability Zone
+Subnet name
+IPv4 CIDR
+
+3. CREATE INTERNET GATEWAY
+
+---
+
+VPC → Internet Gateways → Create internet gateway
+
+Name:
+employee-igw
+
+After creation:
+
+Actions → Attach to VPC
+
+Select:
+employee-vpc
+
+4. CREATE PUBLIC ROUTE TABLE
+
+---
+
+VPC → Route Tables → Create route table
+
+Name:
+employee-public-rt
+
+VPC:
+employee-vpc
+
+Add Internet route:
+
+Routes → Edit routes → Add route
+
+Destination:
+0.0.0.0/0
+
+Target:
+Internet Gateway
+employee-igw
+
+Associate subnets:
+
+Subnet associations → Edit subnet associations
+
+Select:
+employee-public-1
+employee-public-2
+
+RESULT:
+
+employee-public-rt
+|
++-- employee-public-1
++-- employee-public-2
+
+Route:
+0.0.0.0/0 → employee-igw
+
+5. CREATE PRIVATE APP ROUTE TABLE
+
+---
+
+VPC → Route Tables → Create route table
+
+Name:
+employee-private-app-rt
+
+VPC:
+employee-vpc
+
+Associate:
+
+```
+employee-private-app-1
+employee-private-app-2
+```
+
+Procedure:
+
+Subnet associations → Edit subnet associations
+→ Select both private app subnets
+→ Save
+
+6. CREATE PRIVATE DB ROUTE TABLE
+
+---
+
+VPC → Route Tables → Create route table
+
+Name:
+employee-private-db-rt
+
+VPC:
+employee-vpc
+
+Associate:
+
+```
+employee-private-db-1
+employee-private-db-2
+```
+
+No Internet route is added to this route table.
+
+7. CREATE NAT GATEWAY
+
+---
+
+VPC → NAT Gateways → Create NAT gateway
+
+Name:
+employee-nat-gateway
+
+Subnet:
+employee-public-1
+
+Connectivity type:
+Public
+
+Elastic IP:
+Allocate Elastic IP
+
+Create NAT Gateway.
+
+Wait until status becomes:
+
+```
+Available
+```
+
+## 8. ADD NAT ROUTE TO PRIVATE APP
+
+VPC → Route Tables
+
+Select:
+employee-private-app-rt
+
+Routes → Edit routes → Add route
+
+Destination:
+0.0.0.0/0
+
+Target:
+NAT Gateway
+employee-nat-gateway
+
+Save changes.
+
+RESULT:
+
+employee-private-app-rt
+|
++-- employee-private-app-1
++-- employee-private-app-2
+
+Route:
+0.0.0.0/0 → employee-nat-gateway
+
+9. FINAL ROUTE TABLES
+
+---
+
+## PUBLIC ROUTE TABLE
+
+Name:
+employee-public-rt
+
+Subnets:
+employee-public-1
+employee-public-2
+
+Routes:
+
+```
+Destination       Target
+
+10.0.0.0/16       local
+0.0.0.0/0         employee-igw
+```
+
+## PRIVATE APP ROUTE TABLE
+
+Name:
+employee-private-app-rt
+
+Subnets:
+employee-private-app-1
+employee-private-app-2
+
+Routes:
+
+```
+Destination       Target
+
+10.0.0.0/16       local
+0.0.0.0/0         employee-nat-gateway
+```
+
+## PRIVATE DB ROUTE TABLE
+
+Name:
+employee-private-db-rt
+
+Subnets:
+employee-private-db-1
+employee-private-db-2
+
+Routes:
+
+```
+Destination       Target
+
+10.0.0.0/16       local
+```
+
+## 10. FINAL NETWORK
+
+```
+                Internet
+                   |
+                   v
+           Internet Gateway
+                   |
+         +---------+---------+
+         |                   |
+         v                   v
+    Public Subnet 1     Public Subnet 2
+    10.0.1.0/24         10.0.2.0/24
+         |
+    NAT Gateway
+         |
+         v
+   Private App Route
+      /         \
+     v           v
+  App-1         App-2
+```
+
+10.0.3.0/24   10.0.4.0/24
+
+```
+   Private DB Route
+      /         \
+     v           v
+   DB-1         DB-2
+```
+
+10.0.5.0/24   10.0.6.0/24
+
+11. IMPORTANT RULES
+
+---
+
+* Public subnet = subnet whose route table has 0.0.0.0/0 → Internet Gateway.
+* Private App subnet = uses NAT Gateway for outbound Internet.
+* Private DB subnet = no Internet route.
+* NAT Gateway must be placed in a public subnet.
+* Route tables are associated with subnets.
+* Do not expose private application/database subnets directly to the Internet.
+* Do not add an Internet Gateway route to private DB subnets.
+
+12. COMPLETED
+
+---
+
+[x] VPC
+[x] 6 Subnets
+[x] Internet Gateway
+[x] Public Route Table
+[x] Private App Route Table
+[x] Private DB Route Table
+[x] NAT Gateway
+[x] Route Table Associations
+[x] Public Internet Route
+[x] Private App NAT Route
+
+NEXT:
+Create Security Groups.
+
+
+
+
+
+
+
+
+
+
+# AWS Security Groups — Quick Note
+
+Security Groups act as **virtual firewalls** for AWS resources.
+
+### 1. ALB Security Group — `employee-alb-sg`
+
+* Protects the Load Balancer
+* **Inbound:** TCP `80` from Internet
+* **Inbound:** TCP `443` from Internet (for future HTTPS)
+* **Outbound:** Allow all
+
+```text
+Internet → ALB :80/:443
+```
+
+### 2. EC2 Security Group — `employee-ec2-sg`
+
+* Protects the EC2 application server
+* **Inbound:** TCP `80` from `employee-alb-sg`
+* No public SSH because we use SSM
+* Backend ports `3000, 5000, 8000, 8080` are not exposed
+* **Outbound:** Allow all
+
+```text
+ALB → EC2 :80
+```
+
+### 3. RDS Security Group — `employee-rds-sg`
+
+* Protects RDS MySQL
+* **Inbound:** TCP `3306` from `employee-ec2-sg`
+* No public access to MySQL
+* **Outbound:** Allow all
+
+```text
+EC2 → RDS :3306
+```
+
+### Final Flow
+
+```text
+Internet
+   ↓ :80/:443
+ALB
+   ↓ :80
+EC2 / NGINX
+   ↓ :3306
+RDS MySQL
+```
+
+**Important:** The port in an SG rule is the **destination port on the resource receiving the connection**.

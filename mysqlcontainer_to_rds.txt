@@ -1,0 +1,352 @@
+Our goal is to move the database from a Docker container to AWS RDS without losing data.
+
+Step 1: Understand the original architecture
+
+Initially, everything was running through Docker Compose.
+
+EC2
+ |
+ └── Docker Compose
+      |
+      ├── MySQL container
+      |    └── employee_db
+      |
+      ├── FastAPI
+      ├── Express
+      ├── Spring Boot
+      ├── .NET
+      └── NGINX
+
+Your backends connected to MySQL using:
+
+DB_HOST=mysql
+DB_USER=employee_user
+DB_PASSWORD=employee_password
+DB_NAME=employee_db
+DB_PORT=3306
+
+Here, mysql was the Docker Compose service name. Docker's internal network allowed the other containers to find MySQL using that name.
+
+Now we want to replace the MySQL container with AWS RDS.
+
+Step 2: Create an RDS database
+
+We created an Amazon RDS MySQL database using the AWS Console.
+
+Steps:
+
+Open AWS Console.
+Navigate to RDS → Databases → Create database.
+Choose the MySQL engine.
+Choose an appropriate instance size.
+Set the DB instance identifier to employee-rds.
+Configure the master username and password.
+Select the same VPC as your EC2 instance.
+Select a DB subnet group containing private subnets in different Availability Zones.
+Set Public access to No.
+Configure the RDS security group to allow inbound TCP port 3306 from your EC2 security group.
+Set the initial database name to employee_db, if using that field.
+Click Create database and wait for the status to become Available.
+What is a DB subnet group?
+
+A DB subnet group tells RDS which subnets it can use inside your VPC.
+
+RDS generally requires subnets in at least two Availability Zones for its DB subnet group.
+
+Why did we configure the security group?
+
+We want this connection:
+
+EC2 ───── TCP 3306 ─────> RDS MySQL
+
+We don't want the database publicly accessible to everyone.
+
+Step 3: Get the RDS endpoint
+
+After RDS was created, we opened:
+
+RDS → Databases → employee-rds → Connectivity & security
+
+We copied the endpoint.
+
+Your endpoint is:
+
+employee-rds.cl6u40kw03u6.ap-southeast-2.rds.amazonaws.com
+
+The port is:
+
+3306
+
+What is an endpoint?
+
+An endpoint is the hostname your application uses to find and connect to the RDS database.
+
+Previously, the hostname was mysql. Now it is the RDS endpoint.
+
+Step 4: Connect to RDS from EC2
+
+We connected to EC2 using AWS Systems Manager (SSM).
+
+First, we checked whether the MySQL client was installed:
+
+mysql --version
+
+If it wasn't installed on Ubuntu, we could install it:
+
+sudo apt update
+sudo apt install mysql-client -y
+
+Then we connected to RDS:
+
+mysql \
+  -h employee-rds.cl6u40kw03u6.ap-southeast-2.rds.amazonaws.com \
+  -P 3306 \
+  -u admin \
+  -p
+
+The command means:
+
+-h: RDS hostname.
+-P: MySQL port.
+-u: database username.
+-p: ask for the password securely.
+
+After entering the password, we successfully connected and reached:
+
+mysql>
+
+This confirmed that EC2 could connect to RDS.
+
+Step 5: Import init.sql into RDS
+
+Your project contains this file:
+
+4-framework-pipeline/
+└── mysql/
+    └── init.sql
+
+This SQL file contains database initialization instructions, such as creating tables and inserting initial data.
+
+First, we located your project on EC2.
+
+Your project directory is:
+
+/home/ssm-user/4-framework-pipeline
+
+We navigated to it:
+
+cd ~/4-framework-pipeline
+
+Then we checked that the SQL file existed:
+
+ls -l mysql/init.sql
+
+Next, we imported the SQL file into RDS:
+
+mysql \
+  -h employee-rds.cl6u40kw03u6.ap-southeast-2.rds.amazonaws.com \
+  -P 3306 \
+  -u admin \
+  -p < mysql/init.sql
+
+We entered the RDS password when prompted.
+
+How does this command work?
+mysql/init.sql
+      |
+      | SQL instructions
+      v
+  MySQL client
+      |
+      | Connects to RDS
+      v
+  AWS RDS MySQL
+
+The < symbol sends the contents of init.sql to the MySQL client, which executes the SQL statements against RDS.
+
+Important: Importing init.sql imports only the database structures and data specified in that file. It doesn't automatically copy all the live data stored in your Docker MySQL database.
+
+Step 6: Verify the RDS database
+
+We can connect to RDS again:
+
+mysql \
+  -h employee-rds.cl6u40kw03u6.ap-southeast-2.rds.amazonaws.com \
+  -P 3306 \
+  -u admin \
+  -p
+
+Inside the MySQL shell, run:
+
+SHOW DATABASES;
+
+Select the database:
+
+USE employee_db;
+
+List the tables:
+
+SHOW TABLES;
+
+To check the records in a table:
+
+SELECT * FROM your_table_name;
+
+Replace your_table_name with an actual table name.
+
+At this point, we have imported init.sql. However, we still need to verify whether all the data from the original Docker MySQL database is present in RDS.
+
+Step 7: Back up the existing Docker MySQL database
+
+This is an important step because your Docker MySQL database might contain additional records that aren't in init.sql.
+
+Do not delete the MySQL container or its volume yet.
+
+First, navigate to the project directory:
+
+cd ~/4-framework-pipeline
+
+Check your running containers:
+
+docker ps -a
+
+Check your Docker volumes:
+
+docker volume ls
+
+Your old MySQL container was named:
+
+employee-mysql
+
+Your Compose volume was named:
+
+mysql_data
+
+Next, inspect the existing Docker database:
+
+docker exec -it employee-mysql mysql -u root -p
+
+Enter the old Docker MySQL root password, not the RDS password.
+
+Inside MySQL, run:
+
+SHOW DATABASES;
+
+Then:
+
+USE employee_db;
+SHOW TABLES;
+
+Check the number of records in each important table:
+
+SELECT COUNT(*) FROM your_table_name;
+
+Exit:
+
+EXIT;
+Create a backup
+
+Run this on the EC2 host:
+
+docker exec employee-mysql mysqldump \
+  -u root -p \
+  --single-transaction \
+  --routines \
+  --triggers \
+  --events \
+  --databases employee_db \
+  > employee_db_backup.sql
+
+Enter the old Docker MySQL root password when prompted.
+
+Check the backup file:
+
+ls -lh employee_db_backup.sql
+
+This creates an SQL dump containing the selected database's schema and data.
+
+Keep this backup safe.
+
+Step 8: Import the Docker MySQL data into RDS
+
+We now have two possible sources:
+
+Source 1: init.sql
+Source 2: Full dump from Docker MySQL
+
+We've already imported init.sql.
+
+The full dump may contain additional tables or records. But because RDS already has data, we must not blindly import the full dump over the existing database.
+
+First, compare the databases:
+
+Check	Docker MySQL	RDS
+Database names	Check	Check
+Table names	Check	Check
+Record counts	Check	Check
+Important records	Check	Check
+
+Then decide how to restore the dump.
+
+If the destination is empty, the dump can be restored with:
+
+mysql \
+  -h employee-rds.cl6u40kw03u6.ap-southeast-2.rds.amazonaws.com \
+  -P 3306 \
+  -u admin \
+  -p < employee_db_backup.sql
+
+However, because you've already imported init.sql, don't run this command yet unless you've confirmed that restoring the dump won't overwrite or conflict with the existing RDS data.
+
+If the schemas or data overlap, we may need to restore into a separate, empty database and validate it first.
+
+After restoration, check the table names and record counts again.
+
+Step 9: Update Docker Compose to use RDS
+
+Previously, your Compose file had a MySQL service:
+
+mysql:
+  image: mysql:8.4
+
+We no longer need this service once the application is ready to use RDS.
+
+We also need to remove:
+
+The MySQL container configuration.
+The MySQL healthcheck.
+The mysql_data volume declaration.
+The init.sql mount for the MySQL container.
+The backend dependencies on MySQL's healthcheck.
+
+For each backend, we need to configure its database connection to use RDS.
+
+The connection details are conceptually:
+
+DB_HOST = employee-rds.cl6u40kw03u6.ap-southeast-2.rds.amazonaws.com
+DB_NAME = employee_db
+DB_PORT = 3306
+DB_USER = <database username>
+DB_PASSWORD = <database password>
+
+The username and password must be valid for RDS.
+
+One important detail: the environment variable names must match what each application actually reads. Spring Boot, for example, may use SPRING_DATASOURCE_URL, SPRING_DATASOURCE_USERNAME, and SPRING_DATASOURCE_PASSWORD instead of the generic DB_* variables.
+
+After updating Compose, validate the file:
+
+docker compose config
+
+Then rebuild and start the application services when you're ready:
+
+docker compose up -d --build
+
+Check the containers:
+
+docker compose ps
+
+Inspect application logs if a service cannot connect to RDS:
+
+docker compose logs --tail=100 fastapi
+
+Use the equivalent command for Express, Spring Boot, .NET, and NGINX.
