@@ -1,0 +1,419 @@
+We built a CI/CD pipeline using Jenkins, Docker, Amazon ECR, EC2, SSM, RDS, and an Application Load Balancer (ALB).
+Our application has five Docker images:
+- Express
+- FastAPI
+- Spring Boot
+- .NET
+- NGINX
+Architecture flow
+              Developer
+                  |
+                  v
+                GitHub
+                  |
+                  v
+             Jenkins EC2
+             (Build Server)
+                  |
+          Build 5 Docker Images
+                  |
+                  v
+               Amazon ECR
+             (Image Registry)
+                  |
+           Jenkins uses SSM
+                  |
+                  v
+               App EC2
+            (Application Server)
+                  |
+                NGINX
+                  |
+         ---------------------
+         |    |    |    |    |
+      Express FastAPI Spring .NET
+                  |
+                  v
+               Amazon RDS
+
+Users ---> ALB ---> App EC2 ---> NGINX ---> Backend API
+
+We use two EC2 instances because Jenkins builds and deploys the application, while App EC2 runs the application.
+2. How we created Jenkins EC2 in a public subnet
+An EC2 instance is a virtual server in AWS.
+We created Jenkins EC2 in a public subnet so that we could access the Jenkins web interface and administer the server.
+Steps we followed
+1. Open AWS Console → EC2 → Instances.
+2. Click Launch instances.
+3. Enter the name for Jenkins EC2.
+4. Select Ubuntu as the operating system.
+5. Choose an instance type.
+6. Select our project VPC.
+7. Select a public subnet.
+8. Enable auto-assign public IP if required.
+9. Select the Jenkins security group.
+10. Attach the Jenkins IAM role.
+11. Configure storage.
+12. Launch the instance.
+What makes a subnet public?
+A subnet is considered public when its route table has a route to an Internet Gateway.
+For internet connectivity, the instance also needs a public IPv4 address or another suitable network path.
+Remember: Selecting a public subnet alone does not guarantee internet connectivity.
+Why did we use a public subnet for Jenkins?
+It made it possible to access Jenkins from our laptop and allowed the server to download packages and communicate with AWS services.
+For a production environment, Jenkins is often placed behind controlled access mechanisms rather than exposed directly to the internet.
+3. Security Groups — How and why we created them
+A Security Group is a virtual firewall attached to an AWS resource.
+It controls which incoming and outgoing network connections are permitted.
+We created separate security groups for Jenkins, App EC2, the ALB, and RDS.
+3.1 Jenkins security group
+Name: employee-jenkins-sg
+How we created it
+1. Open EC2 → Security Groups.
+2. Click Create security group.
+3. Enter employee-jenkins-sg.
+4. Select our project VPC.
+5. Add the inbound rules below.
+6. Create the security group.
+7. Attach it to Jenkins EC2.
+Type	Port	Source	Purpose
+SSH	22	My IP /32	Administrative access
+Custom TCP	8080	My IP /32	Access Jenkins web interface
+
+
+Port 8080 is the default Jenkins web interface port.
+We restricted access to our public IP so that other internet users could not access Jenkins through these rules.
+3.2 App EC2 security group
+Name: employee-ec2-sg
+We configured an inbound rule:
+Type	Port	Source
+HTTP	80	employee-alb-sg
+
+
+This allows the ALB to forward HTTP traffic to App EC2.
+We do not need to open port 22 for Jenkins-to-App-EC2 deployment because we use SSM.
+3.3 ALB security group
+Name: employee-alb-sg
+Inbound rule:
+Type	Port	Source
+HTTP	80	0.0.0.0/0
+
+
+This permits public HTTP requests to reach the ALB.
+If HTTPS is configured, we also need an appropriate inbound rule for port 443.
+3.4 RDS security group
+Name: employee-rds-sg
+Inbound rule:
+Type	Port	Source
+MySQL/Aurora	3306	employee-ec2-sg
+
+
+This permits the application server to connect to the database.
+We do not expose the MySQL port to the entire internet.
+Security Group revision
+Security group	Purpose
+employee-jenkins-sg	Controls access to Jenkins
+employee-ec2-sg	Controls access to the application server
+employee-alb-sg	Controls access to the public entry point
+employee-rds-sg	Controls access to the database
+
+
+Remember: Security Groups control network traffic; IAM roles control AWS permissions.
+4. IAM roles — How and why we created them
+An IAM role grants permissions to an AWS resource.
+We created two main roles.
+4.1 Jenkins IAM role
+Role name:
+employee-jenkins-ssm-role
+How we created it
+1. Open IAM → Roles → Create role.
+2. Select AWS service as the trusted entity.
+3. Choose EC2 as the use case.
+4. Attach the required permissions.
+5. Name the role employee-jenkins-ssm-role.
+6. Create the role.
+7. Open EC2 → Instances.
+8. Select Jenkins EC2.
+9. Choose Actions → Security → Modify IAM role.
+10. Attach the role.
+Why did Jenkins need this role?
+Jenkins needs to communicate with AWS to push Docker images and trigger deployment.
+We configured permissions for:
+- ECR image pushing.
+- SSM deployment commands.
+- Retrieving the status of deployment commands.
+We attached AmazonEC2ContainerRegistryPowerUser for ECR operations.
+We also attached AmazonEC2ContainerRegistryReadOnly to the App EC2 role, not because Jenkins needed it, but because App EC2 downloads images.
+Custom SSM deployment policy
+We created a custom policy called:
+employee-jenkins-deploy-ssm-policy
+Its permissions include:
+ssm:SendCommand
+ssm:GetCommandInvocation
+ssm:ListCommandInvocations
+
+The policy allows Jenkins to send deployment commands to our specific App EC2 instance and check the result.
+Important: AmazonSSMManagedInstanceCore lets the Jenkins instance itself be managed by SSM. The custom policy lets Jenkins send commands to App EC2. These permissions have different purposes.
+4.2 App EC2 IAM role
+Role name:
+employee-ec2-ssm-role
+How we created it
+We followed the same process:
+1. Open IAM → Roles → Create role.
+2. Select AWS service → EC2.
+3. Attach the required policies.
+4. Name the role employee-ec2-ssm-role.
+5. Create the role.
+6. Open EC2 → Instances.
+7. Select App EC2.
+8. Choose Actions → Security → Modify IAM role.
+9. Attach the role.
+We attached these policies:
+Policy	Purpose
+AmazonSSMManagedInstanceCore	Allows App EC2 to communicate with Systems Manager
+AmazonEC2ContainerRegistryReadOnly	Allows App EC2 to pull private images from ECR
+
+
+How we verified the IAM role
+On the relevant EC2 instance, we ran:
+aws sts get-caller-identity --region ap-southeast-2
+
+This returned the AWS account ID and assumed-role ARN.
+Remember: We use IAM roles instead of storing permanent AWS access keys on the EC2 instances.
+5. SSM — How and why we configured it
+SSM stands for AWS Systems Manager.
+We use it to execute commands on App EC2 remotely from Jenkins.
+Why did we need SSM?
+Without SSM, we could configure Jenkins to connect directly to App EC2 through SSH.
+However, SSM allows us to deploy without opening SSH port 22 for Jenkins-to-App-EC2 communication.
+How we configured SSM
+1. Attached AmazonSSMManagedInstanceCore to the App EC2 IAM role.
+2. Ensured the SSM Agent was installed and running.
+3. Ensured App EC2 had network connectivity to the Systems Manager service.
+4. Opened Systems Manager → Fleet Manager → Managed nodes.
+5. Verified that App EC2 appeared as a managed node and was online.
+6. Added the custom SSM deployment policy to the Jenkins IAM role.
+How SSM works
+Jenkins EC2
+     |
+     | AWS API: SendCommand
+     v
+AWS Systems Manager
+     |
+     v
+SSM Agent on App EC2
+     |
+     v
+Execute Docker commands
+
+Jenkins sends a command using the AWS API. Systems Manager delivers the command to the agent on App EC2, which executes it.
+For example:
+docker compose pull
+docker compose up -d --no-build
+
+Remember: SSM requires IAM permissions, a functioning agent, and connectivity to the Systems Manager service.
+6. How we installed and started Jenkins
+Jenkins is our CI/CD automation server.
+It runs on Jenkins EC2 and automates the building, publishing, and deployment of our application.
+We installed Java, Jenkins, Git, Docker, and AWS CLI.
+Why did we install these tools?
+Tool	Purpose
+Java	Runs Jenkins
+Jenkins	Executes the CI/CD pipeline
+Git	Retrieves source code from GitHub
+Docker	Builds application images
+AWS CLI	Interacts with AWS services from pipeline commands
+
+
+Starting Jenkins
+To start Jenkins:
+sudo systemctl start jenkins
+
+To enable it to start automatically after a server reboot:
+sudo systemctl enable jenkins
+
+To check its status:
+sudo systemctl status jenkins
+
+To restart Jenkins:
+sudo systemctl restart jenkins
+
+We accessed the Jenkins web interface using:
+http://JENKINS_PUBLIC_IP:8080
+
+This requires port 8080 to be allowed by the Jenkins security group from our permitted source IP.
+Why did we add the Linux jenkins user to the Docker group?
+By default, Docker commands require root privileges or suitable access to the Docker daemon.
+Jenkins executes pipeline steps as the Linux user named jenkins.
+We ran:
+sudo usermod -aG docker jenkins
+
+Then restarted Jenkins:
+sudo systemctl restart jenkins
+
+We tested Docker access with:
+sudo -u jenkins docker ps
+
+If this works, the Jenkins user can execute Docker commands without adding sudo to every pipeline command.
+Security note: Membership in the Docker group effectively grants root-level control over the host. This is acceptable for a controlled practice lab, but it must be considered carefully in production.
+7. Why we installed AWS CLI
+AWS CLI stands for AWS Command Line Interface.
+It allows us to interact with AWS services using terminal commands instead of manually using the AWS Console.
+We installed AWS CLI on both Jenkins EC2 and App EC2.
+On Jenkins EC2, we use AWS CLI to:
+- Authenticate with ECR.
+- Push images to ECR through Docker.
+- Send deployment commands through SSM.
+- Check the status of remote deployment commands.
+On App EC2, we use AWS CLI to:
+- Authenticate Docker with ECR.
+- Pull private Docker images.
+- Verify which IAM role the instance is using.
+Commands we executed
+Check AWS CLI version:
+aws --version
+
+Check the AWS identity:
+aws sts get-caller-identity --region ap-southeast-2
+
+Authenticate Docker with ECR:
+aws ecr get-login-password --region ap-southeast-2 \
+  | docker login \
+      --username AWS \
+      --password-stdin 621996700521.dkr.ecr.ap-southeast-2.amazonaws.com
+
+Expected output:
+Login Succeeded
+
+Why do we need ECR login?
+Our ECR repositories are private. Docker needs authentication before it can pull or push images.
+The command obtains a temporary ECR authentication token using the EC2 IAM role.
+ECR authorization tokens normally remain valid for 12 hours.
+8. How we created and connected ECR repositories
+ECR stands for Amazon Elastic Container Registry.
+It is our private Docker image registry.
+How we created repositories
+1. Open AWS Console → Amazon ECR.
+2. Open Private registry → Repositories.
+3. Click Create repository.
+4. Select Private.
+5. Enter the repository name.
+6. Enable immutable tags if required.
+7. Create the repository.
+8. Repeat for all five services.
+Our repositories are:
+employee-express
+employee-fastapi
+employee-springboot
+employee-dotnet
+employee-nginx
+
+Our ECR registry is:
+621996700521.dkr.ecr.ap-southeast-2.amazonaws.com
+
+How Jenkins connects to ECR
+First, Jenkins authenticates:
+aws ecr get-login-password --region ap-southeast-2 \
+  | docker login \
+      --username AWS \
+      --password-stdin 621996700521.dkr.ecr.ap-southeast-2.amazonaws.com
+
+Then Jenkins tags an image:
+docker tag employee-express:IMAGE_TAG \
+  621996700521.dkr.ecr.ap-southeast-2.amazonaws.com/employee-express:IMAGE_TAG
+
+Finally, Jenkins pushes it:
+docker push \
+  621996700521.dkr.ecr.ap-southeast-2.amazonaws.com/employee-express:IMAGE_TAG
+
+We repeat this for all five services.
+Remember: Jenkins builds and pushes images; ECR stores them; App EC2 pulls and runs them.
+9. How Jenkins accesses another EC2 instance in the pipeline
+This is one of the most important parts of our project.
+Jenkins runs on one EC2 instance, but it needs to deploy the application to a different EC2 instance.
+We use SSM SendCommand for this communication.
+Our App EC2 instance ID is:
+i-0a963f6ab1fca3e3e
+
+How the pipeline accesses App EC2
+1. Jenkins builds the Docker images.
+2. Jenkins pushes the images to ECR.
+3. Jenkins uses its IAM role to call the SSM API.
+4. Jenkins sends a command targeting App EC2.
+5. Systems Manager delivers the command to App EC2.
+6. App EC2 executes the command.
+7. Jenkins retrieves the command status.
+Conceptually, the AWS CLI command looks like this:
+aws ssm send-command \
+  --region ap-southeast-2 \
+  --instance-ids i-0a963f6ab1fca3e3e \
+  --document-name AWS-RunShellScript \
+  --parameters commands="docker ps"
+
+This is a simplified example. Our actual deployment command contains multiple commands to authenticate with ECR, pull images, run Flyway, and update the containers.
+How we check the result
+The pipeline captures the SSM command ID and uses:
+aws ssm get-command-invocation \
+  --region ap-southeast-2 \
+  --command-id COMMAND_ID \
+  --instance-id i-0a963f6ab1fca3e3e
+
+This lets Jenkins check whether the remote command succeeded or failed.
+Why do we need the custom IAM policy?
+Jenkins must have permission to send the command to the specific App EC2 instance and retrieve the result. Having permission to run SSM on its own EC2 instance is not sufficient.
+10. Why we created the Jenkinsfile
+The Jenkinsfile defines our CI/CD pipeline as code.
+Our Jenkins job is named:
+employee-api-cicd
+
+It uses this repository:
+https://github.com/VedantHirlekar/4-framework-pipeline.git
+
+Branch:
+main
+
+Pipeline script:
+Jenkinsfile
+
+Our pipeline stages
+Stage	What it does
+Checkout	Downloads the project from GitHub
+Prepare Image Tags	Generates a unique tag using the build number and Git SHA
+Build Docker Images	Builds all five images
+Login to Amazon ECR	Authenticates Jenkins with ECR
+Tag and Push Images	Pushes the images to ECR
+Deploy to App EC2 via SSM	Sends deployment commands to App EC2
+
+
+How the image tag is generated
+Our Jenkinsfile runs:
+git rev-parse --short=7 HEAD
+
+It combines the short Git SHA with the Jenkins build number to create a tag such as:
+build-12-a1b2c3d
+
+This helps us identify which application revision was built.
+We use unique tags because our ECR repositories have immutable tags enabled.
+11. How Docker Compose deploys the application
+Our docker-compose.yml defines the application services.
+For example, an image reference looks like:
+image: 621996700521.dkr.ecr.ap-southeast-2.amazonaws.com/employee-express:${IMAGE_TAG}
+
+The ${IMAGE_TAG} variable tells Compose which image version to use.
+Commands we execute during deployment
+Check the Compose configuration:
+IMAGE_TAG=test docker compose config --quiet
+
+Pull the specified images:
+docker compose pull
+
+Run Flyway migrations:
+docker compose run --rm flyway
+
+Update the application containers:
+docker compose up -d --no-build --remove-orphans fastapi express springboot dotnet nginx
+
+Check the running containers:
+docker compose ps
+
+The --no-build option prevents Compose from building application images on App EC2. Jenkins has already built and published them.
